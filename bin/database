@@ -1,0 +1,60 @@
+#!/usr/bin/env php
+<?php declare(strict_types=1);
+
+use Alantiller\Database;
+
+$autoload = $GLOBALS['_composer_autoload_path'] ?? dirname(__DIR__) . '/vendor/autoload.php';
+require $autoload;
+
+/**
+ * Run the package CLI against an explicit trusted PHP configuration file.
+ *
+ * Configuration returns ['connection' => Medoo options or PDO, 'migrations' => options].
+ * Output is JSON for automation. Errors omit exception causes and configuration
+ * values; application code can inspect those privately through the PHP API.
+ * @param list<string> $arguments Executable name, command, config path and optional version.
+ * @return int Process exit status: 0 success, 1 execution/config fault, 2 usage error.
+ */
+function database_main(array $arguments): int
+{
+    $command = $arguments[1] ?? 'help';
+    if ($command === 'help' || $command === '--help' || $command === '-h') {
+        fwrite(STDOUT, "Usage: database <status|migrate|rollback|tables|make> <config.php> [14-digit-version]\n");
+        return 0;
+    }
+    if (!in_array($command, ['status', 'migrate', 'rollback', 'tables', 'make'], true)
+        || count($arguments) !== ($command === 'make' ? 4 : 3)) {
+        fwrite(STDERR, "Invalid arguments. Run database --help for usage.\n");
+        return 2;
+    }
+    try {
+        $path = realpath($arguments[2]);
+        if ($path === false || !is_file($path) || !is_readable($path)) {
+            throw new RuntimeException('Configuration must be a readable local PHP file.');
+        }
+        $config = (static function (string $path): mixed { return require $path; })($path);
+        if (!is_array($config) || array_diff(array_keys($config), ['connection', 'migrations']) !== []
+            || (!is_array($config['connection'] ?? null) && !($config['connection'] ?? null) instanceof PDO)
+            || !is_array($config['migrations'] ?? [])) {
+            throw new RuntimeException('Configuration must provide connection and optional migrations options.');
+        }
+        $database = new Database($config['connection'], $config['migrations'] ?? []);
+        $result = match ($command) {
+            'status' => $database->migration_status(),
+            'migrate' => $database->migration_run(),
+            'rollback' => $database->migration_rollback(),
+            'tables' => $database->get_tables(),
+            'make' => $database->migration_create($arguments[3]),
+        };
+        fwrite(STDOUT, json_encode($result, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR) . "\n");
+        return 0;
+    } catch (Throwable $exception) {
+        // A connection/PHP exception can contain credentials or SQL values.
+        $message = $exception instanceof \Alantiller\Database\Exceptions\BaseException
+            ? $exception->getMessage() : 'Database command failed; check configuration and database availability.';
+        fwrite(STDERR, $message . "\n");
+        return 1;
+    }
+}
+
+exit(database_main($_SERVER['argv'] ?? []));
